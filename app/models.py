@@ -9,7 +9,7 @@ Category = Literal[
     "ACCOUNT_ISSUE",
     "CARD_ISSUE",
     "PAYMENT_ISSUE",
-    "BILLING_ISSUE",
+    "BILLING_ISSUE",  
     "PASSWORD_RESET",
     "OTHER",
 ]
