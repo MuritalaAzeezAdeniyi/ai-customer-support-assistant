@@ -24,6 +24,14 @@ This entry records the AI-assisted implementation of Stage 3 retry handling and 
 - Scope: configuration for `LLM_MAX_RETRIES`, `LLM_INITIAL_BACKOFF_SECONDS`, and `LLM_MAX_BACKOFF_SECONDS`, provider-agnostic retry behavior, CLI-safe error messaging, and retry-focused unit tests.
 - Notes: no real API calls were made during tests. The retry suite uses mocked provider SDK behavior and does not require live API credentials.
 
+## 2026-10-05 - Rate-limit handling and fallback model support
+This entry records the AI-assisted implementation of Stage 4: rate-limit handling and provider/model fallback behavior.
+
+- Purpose: extend the existing LLM client so rate-limited or temporarily unavailable calls reuse the Stage 3 retry process and then fall back to a configured secondary provider/model without recursive loops.
+- Tooling used: AI-assisted fallback design, retry-path extension, configuration updates, and regression test coverage.
+- Scope: `LLM_FALLBACK_PROVIDER`, `LLM_FALLBACK_MODEL`, and related fallback wiring, rate-limit detection, sanitized error messages, and test coverage for fallback success and failure paths.
+- Notes: all tests use mocked provider SDK behavior only. No live Gemini or OpenAI API calls or real secrets were introduced into the project.
+
 Future entries should follow this format:
 
 ## [YYYY-MM-DD] - [Short topic]

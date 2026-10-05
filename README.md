@@ -1,19 +1,18 @@
 # AI Customer Support Assistant
 
 ## Project purpose
-This project is a CLI-based Python application for triaging fintech customer support requests with an LLM. The current stage connects the application to the OpenAI SDK using a reusable client wrapper and validates the model output against a Pydantic contract.
+This project is a CLI-based Python application for triaging fintech customer support requests with an LLM. The current implementation keeps a reusable provider abstraction around both OpenAI and Gemini, validates the model output against a Pydantic contract, and includes retry plus single-step fallback handling for transient availability issues.
 
 ## Current implementation status
 The project now includes:
 - environment-based configuration
-- Pydantic validation models
-- reusable prompt builders
-- an LLM abstraction layer backed by the OpenAI SDK
+- provider-aware LLM abstraction for OpenAI and Gemini
 - structured output validation using the `SupportResponse` model
+- retry logic with exponential backoff for transient provider failures
+- rate-limit handling using the existing retry mechanism
+- a single configured fallback provider/model for eligible transient failures
 - interactive CLI input for customer support messages
-- unit tests covering validation and client behavior
-
-The project does not yet include retries, fallback logic, streaming, or advanced API error handling.
+- unit tests covering validation, retry behavior, and fallback behavior
 
 ## Technology stack
 - Python 3.12+
@@ -70,6 +69,9 @@ The project expects the following values in `.env`:
 
 ```env
 LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
+LLM_FALLBACK_PROVIDER=openai
+LLM_FALLBACK_MODEL=gpt-4o-mini
 
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-4o-mini
@@ -89,8 +91,13 @@ For local testing with Gemini, set:
 
 ```env
 LLM_PROVIDER=gemini
+LLM_MODEL=gemini-2.0-flash
+LLM_FALLBACK_PROVIDER=gemini
+LLM_FALLBACK_MODEL=gemini-2.5-flash
+
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-2.0-flash
+
 LLM_MAX_RETRIES=3
 LLM_INITIAL_BACKOFF_SECONDS=1.0
 LLM_MAX_BACKOFF_SECONDS=8.0
@@ -98,7 +105,7 @@ LLM_MAX_BACKOFF_SECONDS=8.0
 
 Never commit `.env` or hard-code secrets. Real API calls require a valid API key configured in `.env` only.
 
-## Retry and backoff behavior
+## Rate limits, retries, and fallback behavior
 The LLM client retries only transient failures. These include rate-limit responses (HTTP 429), temporary outage statuses (HTTP 500, 502, 503, 504), timeout conditions, and network-level connection problems.
 
 The client does not retry persistent or client-side failures such as 400 bad requests, 401 authentication errors, 403 permission errors, or 404 model/resource errors. Structured validation errors caused by the project schema are also not retried.
@@ -109,6 +116,8 @@ When a transient error is encountered, the client waits using exponential backof
 - attempt 2: 2s
 - attempt 3: 4s
 - capped at `LLM_MAX_BACKOFF_SECONDS`
+
+If the configured primary provider/model exhausts that retry budget on an eligible transient error, the client attempts a single configured fallback provider/model. The fallback does not recurse indefinitely; it is limited to a single provider/model hop.
 
 This behavior is controlled by environment settings rather than hardcoded values.
 

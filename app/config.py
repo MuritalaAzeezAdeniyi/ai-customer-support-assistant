@@ -17,12 +17,22 @@ class Settings(BaseSettings):
     )
 
     LLM_PROVIDER: Literal["openai", "gemini"] = Field(default="openai", description="LLM provider to use.")
+    LLM_MODEL: str | None = Field(default=None, min_length=1, description="Primary model to use for the active provider.")
+    LLM_FALLBACK_PROVIDER: Literal["openai", "gemini"] | None = Field(
+        default=None,
+        description="Provider to use when the primary provider exhausts transient retries.",
+    )
+    LLM_FALLBACK_MODEL: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Fallback model to use when transient failures exhaust the primary retry budget.",
+    )
     OPENAI_API_KEY: str | None = Field(default=None, min_length=1, description="API key for the OpenAI service.")
     OPENAI_MODEL: str = Field(default="gpt-4o-mini", min_length=1, description="Primary OpenAI model to use.")
-    OPENAI_FALLBACK_MODEL: str = Field(
-        default="gpt-4o-mini",
+    OPENAI_FALLBACK_MODEL: str | None = Field(
+        default=None,
         min_length=1,
-        description="Fallback model for resiliency during outages or rate limits.",
+        description="Fallback OpenAI model for resiliency during outages or rate limits.",
     )
     GEMINI_API_KEY: str | None = Field(default=None, min_length=1, description="API key for the Google Gemini service.")
     GEMINI_MODEL: str = Field(default="gemini-2.0-flash", min_length=1, description="Primary Gemini model to use.")
@@ -53,6 +63,10 @@ class Settings(BaseSettings):
             raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER is set to 'openai'.")
         if self.LLM_PROVIDER == "gemini" and not self.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is required when LLM_PROVIDER is set to 'gemini'.")
+        if self.LLM_FALLBACK_PROVIDER == "openai" and not self.OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required when LLM_FALLBACK_PROVIDER is set to 'openai'.")
+        if self.LLM_FALLBACK_PROVIDER == "gemini" and not self.GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is required when LLM_FALLBACK_PROVIDER is set to 'gemini'.")
         if self.LLM_INITIAL_BACKOFF_SECONDS > self.LLM_MAX_BACKOFF_SECONDS:
             raise ValueError("LLM_INITIAL_BACKOFF_SECONDS must be less than or equal to LLM_MAX_BACKOFF_SECONDS.")
         return self

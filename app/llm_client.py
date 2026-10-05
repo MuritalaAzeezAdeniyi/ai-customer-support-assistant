@@ -90,18 +90,24 @@ class LLMClient:
         provider: str = "openai",
         api_key: str | None = None,
         model: str | None = None,
+        fallback_provider: str | None = None,
         fallback_model: str | None = None,
+        fallback_api_key: str | None = None,
         max_retries: int | None = None,
         initial_backoff_seconds: float | None = None,
         max_backoff_seconds: float | None = None,
         max_output_tokens: int | None = None,
         client: Any | None = None,
+        fallback_client: Any | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.provider = (provider or "openai").lower()
         self.api_key = api_key or ""
         self.model = model or ("gemini-2.0-flash" if self.provider == "gemini" else "gpt-4o-mini")
-        self.fallback_model = fallback_model or self.model
+        self.fallback_provider = (fallback_provider or None)
+        self.fallback_model = fallback_model or None
+        self.fallback_api_key = fallback_api_key or None
+        self.fallback_client = fallback_client
         self.max_retries = max_retries if max_retries is not None else 3
         self.initial_backoff_seconds = float(initial_backoff_seconds if initial_backoff_seconds is not None else 1.0)
         self.max_backoff_seconds = float(max_backoff_seconds if max_backoff_seconds is not None else 8.0)
@@ -124,22 +130,44 @@ class LLMClient:
     def from_settings(cls, settings: Settings) -> "LLMClient":
         """Build an LLM client from the application settings object."""
         max_retries = settings.LLM_MAX_RETRIES if settings.LLM_MAX_RETRIES is not None else settings.OPENAI_MAX_RETRIES
+        primary_model = settings.LLM_MODEL or (settings.GEMINI_MODEL if settings.LLM_PROVIDER == "gemini" else settings.OPENAI_MODEL)
+        fallback_provider = settings.LLM_FALLBACK_PROVIDER
+        fallback_model = settings.LLM_FALLBACK_MODEL or settings.OPENAI_FALLBACK_MODEL
         if settings.LLM_PROVIDER == "gemini":
+            provider_specific_fallback = settings.LLM_FALLBACK_PROVIDER or None
+            if fallback_provider is None and settings.LLM_FALLBACK_MODEL is None and settings.OPENAI_FALLBACK_MODEL is not None:
+                fallback_provider = settings.LLM_PROVIDER
+            if fallback_provider is None and fallback_model is None:
+                fallback_provider = None
+                fallback_model = None
             return cls(
                 provider="gemini",
                 api_key=settings.GEMINI_API_KEY,
-                model=settings.GEMINI_MODEL,
+                model=primary_model,
+                fallback_provider=fallback_provider,
+                fallback_model=fallback_model,
+                fallback_api_key=settings.GEMINI_API_KEY,
                 max_retries=max_retries,
                 initial_backoff_seconds=settings.LLM_INITIAL_BACKOFF_SECONDS,
                 max_backoff_seconds=settings.LLM_MAX_BACKOFF_SECONDS,
                 max_output_tokens=settings.OPENAI_MAX_OUTPUT_TOKENS,
             )
 
+        fallback_api_key = settings.OPENAI_API_KEY
+        if fallback_provider == "gemini":
+            fallback_api_key = settings.GEMINI_API_KEY
+        if fallback_provider is None and settings.LLM_FALLBACK_MODEL is None and settings.OPENAI_FALLBACK_MODEL is not None:
+            fallback_provider = settings.LLM_PROVIDER
+        if fallback_provider is None and fallback_model is None:
+            fallback_provider = None
+            fallback_model = None
         return cls(
             provider="openai",
             api_key=settings.OPENAI_API_KEY,
-            model=settings.OPENAI_MODEL,
-            fallback_model=settings.OPENAI_FALLBACK_MODEL,
+            model=primary_model,
+            fallback_provider=fallback_provider,
+            fallback_model=fallback_model,
+            fallback_api_key=fallback_api_key,
             max_retries=max_retries,
             initial_backoff_seconds=settings.LLM_INITIAL_BACKOFF_SECONDS,
             max_backoff_seconds=settings.LLM_MAX_BACKOFF_SECONDS,
@@ -147,7 +175,11 @@ class LLMClient:
         )
 
     def _sanitize_exception(self, message: str) -> str:
-        return message.replace(self.api_key, "[REDACTED]") if self.api_key else message
+        sanitized = message
+        for secret in {self.api_key, self.fallback_api_key}:
+            if secret:
+                sanitized = sanitized.replace(secret, "[REDACTED]")
+        return sanitized
 
     def _execute_with_retry(self, operation: Callable[[], Any], *, provider_name: str) -> Any:
         """Retry transient provider errors using exponential backoff."""
@@ -184,6 +216,46 @@ class LLMClient:
                 time.sleep(delay)
 
         raise LLMTransientError(f"{provider_name} request failed: max retries reached.")
+
+    def _has_fallback(self) -> bool:
+        if self.fallback_client is not None:
+            return True
+        if not self.fallback_provider and not self.fallback_model and not self.fallback_api_key:
+            return False
+        fallback_provider = (self.fallback_provider or self.provider).lower()
+        fallback_model = self.fallback_model or self.model
+        return fallback_provider != self.provider or fallback_model != self.model
+
+    def _build_fallback_client(self) -> "LLMClient | None":
+        if not self._has_fallback():
+            return None
+        fallback_provider = (self.fallback_provider or self.provider).lower()
+        fallback_model = self.fallback_model or self.model
+        fallback_api_key = self.fallback_api_key or self.api_key
+        return LLMClient(
+            provider=fallback_provider,
+            api_key=fallback_api_key,
+            model=fallback_model,
+            max_retries=self.max_retries,
+            initial_backoff_seconds=self.initial_backoff_seconds,
+            max_backoff_seconds=self.max_backoff_seconds,
+            max_output_tokens=self.max_output_tokens,
+            client=self.fallback_client,
+            logger=self.logger,
+        )
+
+    def _execute_with_fallback(self, *, primary_action: Callable[[], Any], fallback_action: Callable[[], Any] | None) -> Any:
+        try:
+            return primary_action()
+        except LLMTransientError:
+            if fallback_action is None:
+                raise
+            try:
+                return fallback_action()
+            except LLMTransientError as fallback_exc:
+                raise LLMTransientError(
+                    f"Primary and fallback providers exhausted retries: {self._sanitize_exception(str(fallback_exc))}"
+                ) from fallback_exc
 
     def _validate_structured_response(self, payload: Any, *, provider_name: str) -> SupportResponse:
         try:
@@ -261,9 +333,19 @@ class LLMClient:
             raise ValueError("customer_message must not be empty")
 
         if self.provider == "openai":
-            return self._process_openai_message(cleaned_message)
+            fallback_client = self._build_fallback_client()
+            fallback_action = None if fallback_client is None else lambda: fallback_client.process_message(cleaned_message)
+            return self._execute_with_fallback(
+                primary_action=lambda: self._process_openai_message(cleaned_message),
+                fallback_action=fallback_action,
+            )
         if self.provider == "gemini":
-            return self._process_gemini_message(cleaned_message)
+            fallback_client = self._build_fallback_client()
+            fallback_action = None if fallback_client is None else lambda: fallback_client.process_message(cleaned_message)
+            return self._execute_with_fallback(
+                primary_action=lambda: self._process_gemini_message(cleaned_message),
+                fallback_action=fallback_action,
+            )
 
         raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
@@ -278,53 +360,79 @@ class LLMClient:
             response_model = SupportResponse
 
         if self.provider == "openai":
-            def request() -> Any:
-                return self.client.responses.parse(
-                    model=self.model,
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    text_format=response_model,
-                    max_output_tokens=self.max_output_tokens,
-                )
-
-            response = self._execute_with_retry(request, provider_name="OpenAI")
-            parsed_response = getattr(response, "output_parsed", None)
-            if parsed_response is None:
-                raise ValueError("The OpenAI API returned no parsed structured data.")
-            return self._validate_structured_response(parsed_response, provider_name="OpenAI")
+            fallback_client = self._build_fallback_client()
+            fallback_action = None if fallback_client is None else lambda: fallback_client.generate(system_prompt, user_prompt, response_model)
+            return self._execute_with_fallback(
+                primary_action=lambda: self._generate_openai_response(system_prompt, user_prompt, response_model),
+                fallback_action=fallback_action,
+            )
 
         if self.provider == "gemini":
-            combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+            fallback_client = self._build_fallback_client()
+            fallback_action = None if fallback_client is None else lambda: fallback_client.generate(system_prompt, user_prompt, response_model)
+            return self._execute_with_fallback(
+                primary_action=lambda: self._generate_gemini_response(system_prompt, user_prompt, response_model),
+                fallback_action=fallback_action,
+            )
 
-            def request() -> Any:
-                if genai_types is not None:
-                    return self.client.models.generate_content(
-                        model=self.model,
-                        contents=combined_prompt,
-                        config=genai_types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            response_schema=response_model,
-                        ),
-                    )
+        raise ValueError(f"Unsupported LLM provider: {self.provider}")
+
+    def _generate_openai_response(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_model: type[ModelType],
+    ) -> dict[str, Any] | ModelType:
+        def request() -> Any:
+            return self.client.responses.parse(
+                model=self.model,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                text_format=response_model,
+                max_output_tokens=self.max_output_tokens,
+            )
+
+        response = self._execute_with_retry(request, provider_name="OpenAI")
+        parsed_response = getattr(response, "output_parsed", None)
+        if parsed_response is None:
+            raise ValueError("The OpenAI API returned no parsed structured data.")
+        return self._validate_structured_response(parsed_response, provider_name="OpenAI")
+
+    def _generate_gemini_response(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_model: type[ModelType],
+    ) -> dict[str, Any] | ModelType:
+        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+
+        def request() -> Any:
+            if genai_types is not None:
                 return self.client.models.generate_content(
                     model=self.model,
                     contents=combined_prompt,
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=response_model,
+                    ),
                 )
+            return self.client.models.generate_content(
+                model=self.model,
+                contents=combined_prompt,
+            )
 
-            response = self._execute_with_retry(request, provider_name="Gemini")
-            parsed_response = getattr(response, "parsed", None)
-            if parsed_response is None:
-                raw_text = getattr(response, "text", None)
-                if raw_text:
-                    try:
-                        parsed_response = json.loads(raw_text)
-                    except json.JSONDecodeError as exc:
-                        raise ValueError("The Gemini API returned invalid JSON structured data.") from exc
-                else:
-                    raise ValueError("The Gemini API returned no parsed structured data.")
+        response = self._execute_with_retry(request, provider_name="Gemini")
+        parsed_response = getattr(response, "parsed", None)
+        if parsed_response is None:
+            raw_text = getattr(response, "text", None)
+            if raw_text:
+                try:
+                    parsed_response = json.loads(raw_text)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("The Gemini API returned invalid JSON structured data.") from exc
+            else:
+                raise ValueError("The Gemini API returned no parsed structured data.")
 
-            return self._validate_structured_response(parsed_response, provider_name="Gemini")
-
-        raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        return self._validate_structured_response(parsed_response, provider_name="Gemini")
