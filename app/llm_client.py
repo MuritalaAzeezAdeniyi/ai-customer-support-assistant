@@ -257,6 +257,121 @@ class LLMClient:
                     f"Primary and fallback providers exhausted retries: {self._sanitize_exception(str(fallback_exc))}"
                 ) from fallback_exc
 
+    def _iter_stream_chunks(self, stream: Any) -> Any:
+        try:
+            iterator = iter(stream)
+        except TypeError as exc:
+            raise ValueError("The provider stream did not return an iterable payload.") from exc
+
+        for item in iterator:
+            if item is None:
+                continue
+            if isinstance(item, str):
+                yield item
+                continue
+            if hasattr(item, "delta"):
+                delta = getattr(item, "delta")
+                if delta is not None:
+                    if isinstance(delta, str):
+                        yield delta
+                        continue
+                    if isinstance(delta, dict):
+                        text = delta.get("content") or delta.get("text")
+                        if text:
+                            yield str(text)
+                            continue
+            if hasattr(item, "text"):
+                text = getattr(item, "text")
+                if text is not None:
+                    yield str(text)
+                    continue
+            if hasattr(item, "content"):
+                content = getattr(item, "content")
+                if content is not None:
+                    yield str(content)
+                    continue
+            if hasattr(item, "output_text"):
+                output_text = getattr(item, "output_text")
+                if output_text is not None:
+                    yield str(output_text)
+                    continue
+
+    def _stream_openai_response(self, customer_message: str) -> Any:
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(customer_message)
+
+        def request() -> Any:
+            return self.client.responses.stream(
+                model=self.model,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_output_tokens=self.max_output_tokens,
+            )
+
+        stream = self._execute_with_retry(request, provider_name="OpenAI")
+        yield from self._iter_stream_chunks(stream)
+
+    def _stream_gemini_response(self, customer_message: str) -> Any:
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(customer_message)
+        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+
+        def request() -> Any:
+            return self.client.models.generate_content_stream(
+                model=self.model,
+                contents=combined_prompt,
+            )
+
+        stream = self._execute_with_retry(request, provider_name="Gemini")
+        yield from self._iter_stream_chunks(stream)
+
+    def _stream_with_fallback(
+        self,
+        customer_message: str,
+        *,
+        primary_stream: Callable[[str], Any],
+        allow_fallback: bool = True,
+    ) -> Any:
+        try:
+            yield from primary_stream(customer_message)
+            return
+        except Exception as exc:
+            if not is_transient_error(exc):
+                raise
+            if not allow_fallback:
+                raise LLMTransientError(
+                    f"{self.provider.capitalize()} request failed: max retries reached - {self._sanitize_exception(str(exc))}"
+                ) from exc
+            fallback_client = self._build_fallback_client()
+            if fallback_client is None:
+                raise LLMTransientError(
+                    f"{self.provider.capitalize()} request failed: max retries reached - {self._sanitize_exception(str(exc))}"
+                ) from exc
+            yield from fallback_client.stream_response(customer_message, allow_fallback=False)
+
+    def stream_response(self, customer_message: str, *, allow_fallback: bool = True) -> Any:
+        """Stream plain-text output from the configured provider without exposing SDK objects."""
+        cleaned_message = (customer_message or "").strip()
+        if not cleaned_message:
+            raise ValueError("customer_message must not be empty")
+
+        if self.provider == "openai":
+            return self._stream_with_fallback(
+                cleaned_message,
+                primary_stream=self._stream_openai_response,
+                allow_fallback=allow_fallback,
+            )
+        if self.provider == "gemini":
+            return self._stream_with_fallback(
+                cleaned_message,
+                primary_stream=self._stream_gemini_response,
+                allow_fallback=allow_fallback,
+            )
+
+        raise ValueError(f"Unsupported LLM provider: {self.provider}")
+
     def _validate_structured_response(self, payload: Any, *, provider_name: str) -> SupportResponse:
         try:
             if isinstance(payload, SupportResponse):

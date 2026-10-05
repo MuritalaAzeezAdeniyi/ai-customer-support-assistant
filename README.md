@@ -121,12 +121,23 @@ If the configured primary provider/model exhausts that retry budget on an eligib
 
 This behavior is controlled by environment settings rather than hardcoded values.
 
+## Streaming support
+The client supports a separate text-streaming interface for incremental output. Use `generate()` when you need a validated `SupportResponse` object. Use `stream_response()` when you want chunks of plain text as they arrive.
+
+```bash
+python run.py --stream
+```
+
+This mode prints streamed model output linearly as the provider emits chunks. The stream is intended for plain-text presentation only and does not replace the structured `generate()` contract.
+
+The stream begins only after the request is successfully started. If a provider fails before the stream begins, the existing retry and fallback logic is still used. Once a stream has started, the code does not restart a partially consumed stream to avoid duplicating output.
+
 ## Running the application
 ```bash
 python run.py
 ```
 
-The app will prompt for a customer message and print the structured response in a readable format. If `LLM_PROVIDER=gemini`, the request is sent through the Google Gemini SDK instead of OpenAI.
+The default mode prints the structured response in a readable format. If `LLM_PROVIDER=gemini`, the request is sent through the Google Gemini SDK instead of OpenAI. For a text-streaming demo, use `python run.py --stream`.
 
 ## Testing instructions
 Run the unit tests with:

@@ -350,3 +350,146 @@ def test_no_fallback_config_returns_primary_failure_cleanly(monkeypatch) -> None
         client.process_message("My account is still inaccessible.")
 
     assert calls["count"] == 3
+
+
+def test_stream_response_yields_multiple_chunks(monkeypatch) -> None:
+    monkeypatch.setattr("app.llm_client.time.sleep", lambda delay: None)
+
+    class FakeStream:
+        def __iter__(self):
+            return iter([
+                SimpleNamespace(delta="Hello "),
+                SimpleNamespace(delta="world"),
+                SimpleNamespace(delta="!"),
+            ])
+
+    class FakeResponses:
+        @staticmethod
+        def stream(**kwargs):
+            return FakeStream()
+
+    client = LLMClient(
+        provider="openai",
+        api_key="test-key",
+        model="gpt-4o-mini",
+        max_retries=1,
+        client=SimpleNamespace(responses=FakeResponses()),
+    )
+
+    chunks = list(client.stream_response("How can I help?"))
+
+    assert chunks == ["Hello ", "world", "!"]
+
+
+def test_stream_response_uses_selected_provider(monkeypatch) -> None:
+    monkeypatch.setattr("app.llm_client.time.sleep", lambda delay: None)
+
+    class FakeGeminiClient:
+        class models:
+            @staticmethod
+            def generate_content_stream(**kwargs):
+                return iter([SimpleNamespace(text="gemini chunk")])
+
+    client = LLMClient(
+        provider="gemini",
+        api_key="gemini-key",
+        model="gemini-2.0-flash",
+        max_retries=1,
+        client=FakeGeminiClient(),
+    )
+
+    chunks = list(client.stream_response("My transfer is stuck."))
+
+    assert chunks == ["gemini chunk"]
+    assert client.provider == "gemini"
+
+
+def test_stream_response_failure_is_controlled_and_sanitized(monkeypatch) -> None:
+    monkeypatch.setattr("app.llm_client.time.sleep", lambda delay: None)
+
+    class FakeResponses:
+        @staticmethod
+        def stream(**kwargs):
+            raise openai.RateLimitError(
+                "too many requests",
+                response=httpx.Response(429, request=httpx.Request("POST", "https://example.com")),
+                body=None,
+            )
+
+    client = LLMClient(
+        provider="openai",
+        api_key="secret-stream-key",
+        model="gpt-4o-mini",
+        max_retries=1,
+        client=SimpleNamespace(responses=FakeResponses()),
+    )
+
+    with pytest.raises(LLMTransientError) as exc_info:
+        list(client.stream_response("My payment is retrying."))
+
+    message = str(exc_info.value)
+    assert "max retries" in message
+    assert "secret-stream-key" not in message
+
+
+def test_generate_behavior_remains_unchanged_after_streaming_support() -> None:
+    payload = SupportResponse(
+        category="PAYMENT_ISSUE",
+        priority="MEDIUM",
+        sentiment="NEGATIVE",
+        requires_human=False,
+        suggested_response="We are reviewing your payment issue.",
+    )
+
+    class FakeResponses:
+        @staticmethod
+        def parse(**kwargs):
+            return SimpleNamespace(output_parsed=payload)
+
+    client = LLMClient(
+        api_key="test-key",
+        model="gpt-4o-mini",
+        max_output_tokens=256,
+        client=SimpleNamespace(responses=FakeResponses()),
+    )
+
+    result = client.generate("system", "customer")
+
+    assert isinstance(result, SupportResponse)
+    assert result.category == "PAYMENT_ISSUE"
+
+
+def test_stream_response_falls_back_once_when_primary_stream_fails(monkeypatch) -> None:
+    monkeypatch.setattr("app.llm_client.time.sleep", lambda delay: None)
+
+    class PrimaryStream:
+        def __iter__(self):
+            raise openai.APIStatusError("primary stream down", response=httpx.Response(503, request=httpx.Request("POST", "https://example.com")), body=None)
+
+    class PrimaryResponses:
+        @staticmethod
+        def stream(**kwargs):
+            return PrimaryStream()
+
+    class FallbackResponses:
+        @staticmethod
+        def stream(**kwargs):
+            return iter([SimpleNamespace(delta="fallback chunk")])
+
+    client = LLMClient(
+        provider="openai",
+        api_key="primary-key",
+        model="gpt-4o-mini",
+        fallback_provider="openai",
+        fallback_model="gpt-4o-mini",
+        fallback_api_key="fallback-key",
+        max_retries=1,
+        initial_backoff_seconds=1.0,
+        max_backoff_seconds=8.0,
+        client=SimpleNamespace(responses=PrimaryResponses()),
+        fallback_client=SimpleNamespace(responses=FallbackResponses()),
+    )
+
+    chunks = list(client.stream_response("Service is flaky."))
+
+    assert chunks == ["fallback chunk"]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+
 from .config import Settings
 from .llm_client import LLMClient
 
@@ -22,6 +24,14 @@ def _format_response(response: object) -> str:
 
 def main() -> None:
     """Interactive CLI for submitting customer support requests to the model."""
+    parser = argparse.ArgumentParser(description="AI Customer Support Assistant")
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Stream the assistant's response incrementally instead of waiting for a full structured output.",
+    )
+    args = parser.parse_args()
+
     settings = Settings()
     client = LLMClient.from_settings(settings)
     provider_key = settings.GEMINI_API_KEY if settings.LLM_PROVIDER == "gemini" else settings.OPENAI_API_KEY
@@ -43,8 +53,14 @@ def main() -> None:
             break
 
         try:
-            response = client.process_message(message)
-            print(_format_response(response))
+            if args.stream:
+                print("Streaming response:")
+                for chunk in client.stream_response(message):
+                    print(chunk, end="", flush=True)
+                print()
+            else:
+                response = client.process_message(message)
+                print(_format_response(response))
         except ValueError as exc:
             print(f"Validation error: {_sanitize_message(str(exc), provider_key)}")
         except Exception as exc:  # pragma: no cover - CLI safety envelope

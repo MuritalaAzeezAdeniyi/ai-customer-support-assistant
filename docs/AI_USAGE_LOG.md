@@ -32,6 +32,14 @@ This entry records the AI-assisted implementation of Stage 4: rate-limit handlin
 - Scope: `LLM_FALLBACK_PROVIDER`, `LLM_FALLBACK_MODEL`, and related fallback wiring, rate-limit detection, sanitized error messages, and test coverage for fallback success and failure paths.
 - Notes: all tests use mocked provider SDK behavior only. No live Gemini or OpenAI API calls or real secrets were introduced into the project.
 
+## 2026-10-05 - Streaming support for text output
+This entry records the AI-assisted implementation of Stage 5: incremental streaming support for the existing LLM client.
+
+- Purpose: add a simple `stream_response()` interface that yields text chunks without altering the existing structured `generate()` contract or the retry/fallback flow.
+- Tooling used: AI-assisted stream design, provider-specific SDK adaptation, CLI demo wiring, and mocked regression tests for streaming and fallback behavior.
+- Scope: OpenAI streaming through `responses.stream`, Gemini streaming through `generate_content_stream`, provider-agnostic chunk normalization, CLI `--stream` support, and documentation updates.
+- Notes: the stream is treated as a plain-text presentation layer and intentionally does not restart a partially consumed stream. All testing remains mocked and secret-safe.
+
 Future entries should follow this format:
 
 ## [YYYY-MM-DD] - [Short topic]
