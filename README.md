@@ -105,6 +105,9 @@ LLM_MAX_BACKOFF_SECONDS=8.0
 
 Never commit `.env` or hard-code secrets. Real API calls require a valid API key configured in `.env` only.
 
+## Token budget and output limits
+The client exposes a configurable maximum output-token budget through `OPENAI_MAX_OUTPUT_TOKENS` and passes it through to the active provider SDK request. This keeps the response size bounded without changing the project’s structured output contract.
+
 ## Rate limits, retries, and fallback behavior
 The LLM client retries only transient failures. These include rate-limit responses (HTTP 429), temporary outage statuses (HTTP 500, 502, 503, 504), timeout conditions, and network-level connection problems.
 

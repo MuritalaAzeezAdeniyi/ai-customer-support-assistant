@@ -579,6 +579,7 @@ class LLMClient:
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema=SupportResponse,
+                        max_output_tokens=self.max_output_tokens,
                     ),
                 )
             return self.client.models.generate_content(
@@ -718,6 +719,7 @@ class LLMClient:
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema=response_model,
+                        max_output_tokens=self.max_output_tokens,
                     ),
                 )
             return self.client.models.generate_content(
