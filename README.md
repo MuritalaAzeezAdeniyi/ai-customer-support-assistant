@@ -74,11 +74,15 @@ LLM_PROVIDER=openai
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-4o-mini
 OPENAI_FALLBACK_MODEL=gpt-4o-mini
-OPENAI_MAX_RETRIES=2
+OPENAI_MAX_RETRIES=3
 OPENAI_MAX_OUTPUT_TOKENS=512
 
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-2.0-flash
+
+LLM_MAX_RETRIES=3
+LLM_INITIAL_BACKOFF_SECONDS=1.0
+LLM_MAX_BACKOFF_SECONDS=8.0
 ```
 
 For local testing with Gemini, set:
@@ -87,9 +91,26 @@ For local testing with Gemini, set:
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-2.0-flash
+LLM_MAX_RETRIES=3
+LLM_INITIAL_BACKOFF_SECONDS=1.0
+LLM_MAX_BACKOFF_SECONDS=8.0
 ```
 
 Never commit `.env` or hard-code secrets. Real API calls require a valid API key configured in `.env` only.
+
+## Retry and backoff behavior
+The LLM client retries only transient failures. These include rate-limit responses (HTTP 429), temporary outage statuses (HTTP 500, 502, 503, 504), timeout conditions, and network-level connection problems.
+
+The client does not retry persistent or client-side failures such as 400 bad requests, 401 authentication errors, 403 permission errors, or 404 model/resource errors. Structured validation errors caused by the project schema are also not retried.
+
+When a transient error is encountered, the client waits using exponential backoff with a capped maximum delay:
+
+- attempt 1: 1s
+- attempt 2: 2s
+- attempt 3: 4s
+- capped at `LLM_MAX_BACKOFF_SECONDS`
+
+This behavior is controlled by environment settings rather than hardcoded values.
 
 ## Running the application
 ```bash

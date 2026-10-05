@@ -4,6 +4,13 @@ from .config import Settings
 from .llm_client import LLMClient
 
 
+def _sanitize_message(message: str, api_key: str | None = None) -> str:
+    cleaned = message
+    if api_key:
+        cleaned = cleaned.replace(api_key, "[REDACTED]")
+    return cleaned
+
+
 def _format_response(response: object) -> str:
     """Return a readable representation of the parsed support response."""
     data = response.model_dump() if hasattr(response, "model_dump") else response
@@ -17,6 +24,7 @@ def main() -> None:
     """Interactive CLI for submitting customer support requests to the model."""
     settings = Settings()
     client = LLMClient.from_settings(settings)
+    provider_key = settings.GEMINI_API_KEY if settings.LLM_PROVIDER == "gemini" else settings.OPENAI_API_KEY
 
     print("AI Customer Support Assistant")
     print(f"Provider: {client.provider}")
@@ -38,9 +46,9 @@ def main() -> None:
             response = client.process_message(message)
             print(_format_response(response))
         except ValueError as exc:
-            print(f"Validation error: {exc}")
-        except RuntimeError as exc:
-            print(f"Request failed: {exc}")
+            print(f"Validation error: {_sanitize_message(str(exc), provider_key)}")
+        except Exception as exc:  # pragma: no cover - CLI safety envelope
+            print(f"Request failed: {_sanitize_message(str(exc), provider_key)}")
 
 
 if __name__ == "__main__":

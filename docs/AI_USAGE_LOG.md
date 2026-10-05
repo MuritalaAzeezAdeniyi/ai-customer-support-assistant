@@ -16,6 +16,14 @@ This entry records the AI-assisted addition of Gemini as a second LLM provider w
 - Scope: Gemini environment variables, dependency update, provider-aware client design, CLI output improvements, README updates, and unit tests for Gemini success and failure handling.
 - Notes: no real Gemini API key or `.env` secret material was committed. The tests mock the Gemini SDK interaction and do not require a live API key.
 
+## 2026-10-05 - Retry behavior and exponential backoff
+This entry records the AI-assisted implementation of Stage 3 retry handling and exponential backoff for the LLM client.
+
+- Purpose: add a reusable retry wrapper for transient provider failures while preserving the OpenAI and Gemini integrations and their structured response contract.
+- Tooling used: AI-assisted retry design, transient error classification, backoff calculation, and test validation.
+- Scope: configuration for `LLM_MAX_RETRIES`, `LLM_INITIAL_BACKOFF_SECONDS`, and `LLM_MAX_BACKOFF_SECONDS`, provider-agnostic retry behavior, CLI-safe error messaging, and retry-focused unit tests.
+- Notes: no real API calls were made during tests. The retry suite uses mocked provider SDK behavior and does not require live API credentials.
+
 Future entries should follow this format:
 
 ## [YYYY-MM-DD] - [Short topic]
