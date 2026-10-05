@@ -40,6 +40,14 @@ This entry records the AI-assisted implementation of Stage 5: incremental stream
 - Scope: OpenAI streaming through `responses.stream`, Gemini streaming through `generate_content_stream`, provider-agnostic chunk normalization, CLI `--stream` support, and documentation updates.
 - Notes: the stream is treated as a plain-text presentation layer and intentionally does not restart a partially consumed stream. All testing remains mocked and secret-safe.
 
+## 2026-10-05 - Lightweight observability for request lifecycle
+This entry records the AI-assisted implementation of Stage 6: lightweight standard-library observability for LLM requests and stream lifecycle events.
+
+- Purpose: add request-level logging for start, retry, fallback, success, and failure without introducing external monitoring frameworks or exposing secrets.
+- Tooling used: AI-assisted logging design, standard-library integration, and `caplog`-based test coverage for retry and stream behavior.
+- Scope: lifecycle log events in the LLM client, safe metadata fields, stream lifecycle events, and README updates describing what is intentionally excluded from logs.
+- Notes: no API keys, customer messages, or prompt payloads are included in logs. All tests remain mocked and no real API calls are used.
+
 Future entries should follow this format:
 
 ## [YYYY-MM-DD] - [Short topic]

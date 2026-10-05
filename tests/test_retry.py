@@ -352,6 +352,168 @@ def test_no_fallback_config_returns_primary_failure_cleanly(monkeypatch) -> None
     assert calls["count"] == 3
 
 
+def test_successful_request_logs_success(caplog) -> None:
+    payload = SupportResponse(
+        category="CARD_ISSUE",
+        priority="HIGH",
+        sentiment="NEGATIVE",
+        requires_human=True,
+        suggested_response="We are investigating the card issue.",
+    )
+
+    class FakeResponses:
+        @staticmethod
+        def parse(**kwargs):
+            return SimpleNamespace(output_parsed=payload)
+
+    client = LLMClient(
+        provider="openai",
+        api_key="sk-test-key",
+        model="gpt-4o-mini",
+        max_output_tokens=256,
+        client=SimpleNamespace(responses=FakeResponses()),
+    )
+
+    with caplog.at_level("INFO"):
+        response = client.process_message("My card was charged twice.")
+
+    assert isinstance(response, SupportResponse)
+    assert "llm_request_started" in caplog.text
+    assert "llm_request_succeeded" in caplog.text
+    assert "sk-test-key" not in caplog.text
+    assert "My card was charged twice." not in caplog.text
+
+
+def test_retry_logs_retry_event(monkeypatch, caplog) -> None:
+    monkeypatch.setattr("app.llm_client.time.sleep", lambda delay: None)
+
+    class FakeResponses:
+        @staticmethod
+        def parse(**kwargs):
+            if not hasattr(FakeResponses, "count"):
+                FakeResponses.count = 0
+            FakeResponses.count += 1
+            if FakeResponses.count < 2:
+                raise _status_error(503, "temporary outage")
+            return SimpleNamespace(output_parsed=SupportResponse(
+                category="ACCOUNT_ISSUE",
+                priority="HIGH",
+                sentiment="NEGATIVE",
+                requires_human=True,
+                suggested_response="We are reviewing the account issue.",
+            ))
+
+    client = LLMClient(
+        provider="openai",
+        api_key="retry-key",
+        model="gpt-4o-mini",
+        max_retries=3,
+        client=SimpleNamespace(responses=FakeResponses()),
+    )
+
+    with caplog.at_level("WARNING"):
+        client.process_message("My account is locked.")
+
+    assert "llm_retry" in caplog.text
+    assert "retry-key" not in caplog.text
+
+
+def test_fallback_logs_fallback_event(monkeypatch, caplog) -> None:
+    monkeypatch.setattr("app.llm_client.time.sleep", lambda delay: None)
+
+    class PrimaryResponses:
+        @staticmethod
+        def parse(**kwargs):
+            raise _status_error(503, "primary unavailable")
+
+    class FallbackResponses:
+        @staticmethod
+        def parse(**kwargs):
+            return SimpleNamespace(output_parsed=SupportResponse(
+                category="BILLING_ISSUE",
+                priority="MEDIUM",
+                sentiment="NEGATIVE",
+                requires_human=False,
+                suggested_response="We are handling the billing issue.",
+            ))
+
+    client = LLMClient(
+        provider="openai",
+        api_key="primary-key",
+        model="gpt-4o-mini",
+        fallback_provider="openai",
+        fallback_model="gpt-4o-mini",
+        fallback_api_key="fallback-key",
+        max_retries=1,
+        client=SimpleNamespace(responses=PrimaryResponses()),
+        fallback_client=SimpleNamespace(responses=FallbackResponses()),
+    )
+
+    with caplog.at_level("WARNING"):
+        client.process_message("My invoice is failing.")
+
+    assert "llm_fallback" in caplog.text
+    assert "primary-key" not in caplog.text
+    assert "fallback-key" not in caplog.text
+
+
+def test_failed_request_logs_category(caplog) -> None:
+    class FakeResponses:
+        @staticmethod
+        def parse(**kwargs):
+            raise openai.AuthenticationError(
+                "invalid API key",
+                response=httpx.Response(401, request=httpx.Request("POST", "https://example.com")),
+                body=None,
+            )
+
+    client = LLMClient(
+        provider="openai",
+        api_key="bad-key",
+        model="gpt-4o-mini",
+        max_retries=1,
+        client=SimpleNamespace(responses=FakeResponses()),
+    )
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(openai.AuthenticationError):
+            client.process_message("My account is locked.")
+
+    assert "llm_request_failed" in caplog.text
+    assert "auth_error" in caplog.text
+    assert "bad-key" not in caplog.text
+
+
+def test_stream_response_logs_start_and_completion(caplog, monkeypatch) -> None:
+    monkeypatch.setattr("app.llm_client.time.sleep", lambda delay: None)
+
+    class FakeStream:
+        def __iter__(self):
+            return iter([SimpleNamespace(delta="hello "), SimpleNamespace(delta="world")])
+
+    class FakeResponses:
+        @staticmethod
+        def stream(**kwargs):
+            return FakeStream()
+
+    client = LLMClient(
+        provider="openai",
+        api_key="stream-key",
+        model="gpt-4o-mini",
+        max_retries=1,
+        client=SimpleNamespace(responses=FakeResponses()),
+    )
+
+    with caplog.at_level("INFO"):
+        chunks = list(client.stream_response("Say hello."))
+
+    assert chunks == ["hello ", "world"]
+    assert "llm_stream_started" in caplog.text
+    assert "llm_stream_completed" in caplog.text
+    assert "stream-key" not in caplog.text
+    assert "Say hello." not in caplog.text
+
+
 def test_stream_response_yields_multiple_chunks(monkeypatch) -> None:
     monkeypatch.setattr("app.llm_client.time.sleep", lambda delay: None)
 

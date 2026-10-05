@@ -132,6 +132,25 @@ This mode prints streamed model output linearly as the provider emits chunks. Th
 
 The stream begins only after the request is successfully started. If a provider fails before the stream begins, the existing retry and fallback logic is still used. Once a stream has started, the code does not restart a partially consumed stream to avoid duplicating output.
 
+## Lightweight observability
+The project uses Python's standard `logging` module to report request lifecycle events without introducing external monitoring dependencies.
+
+The application logs safe metadata such as:
+- provider
+- model
+- operation (`generate` or `stream`)
+- retry attempt number
+- fallback reason/category
+- request duration
+
+The application intentionally does not log:
+- API keys or authorization material
+- customer messages
+- prompts or model output text
+- raw SDK exception payloads with embedded secrets
+
+This keeps diagnostics useful while preserving the assignment's security requirements.
+
 ## Running the application
 ```bash
 python run.py

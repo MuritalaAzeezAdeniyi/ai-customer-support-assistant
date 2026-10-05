@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - dependency is installed in project env
     genai_types = None
 
 ModelType = TypeVar("ModelType", bound=BaseModel)
+logger = logging.getLogger(__name__)
 
 
 class LLMError(RuntimeError):
@@ -181,13 +182,60 @@ class LLMClient:
                 sanitized = sanitized.replace(secret, "[REDACTED]")
         return sanitized
 
-    def _execute_with_retry(self, operation: Callable[[], Any], *, provider_name: str) -> Any:
+    def _error_category(self, exc: Exception) -> str:
+        if isinstance(exc, (TimeoutError, ConnectionError, openai.APIConnectionError, openai.APITimeoutError)):
+            return "timeout_or_network"
+        if isinstance(exc, openai.RateLimitError):
+            return "rate_limit"
+        if isinstance(exc, openai.AuthenticationError):
+            return "auth_error"
+        if isinstance(exc, openai.PermissionDeniedError):
+            return "permission_error"
+        if isinstance(exc, openai.NotFoundError):
+            return "not_found_error"
+        if isinstance(exc, openai.APIStatusError):
+            status_code = getattr(exc, "status_code", None)
+            if status_code in {429, 500, 502, 503, 504}:
+                return "transient_error"
+            if status_code in {400, 401, 403, 404}:
+                return "permanent_error"
+        if genai_errors is not None and isinstance(exc, genai_errors.APIError):
+            status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+            if status_code in {429, 500, 502, 503, 504}:
+                return "transient_error"
+            if status_code in {400, 401, 403, 404}:
+                return "permanent_error"
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None and hasattr(exc, "response"):
+            status_code = getattr(exc.response, "status_code", None)
+        if status_code in {429, 500, 502, 503, 504}:
+            return "transient_error"
+        if status_code in {400, 401, 403, 404}:
+            return "permanent_error"
+        message = str(exc).lower()
+        if any(token in message for token in ("rate limit", "too many requests")):
+            return "rate_limit"
+        if "timeout" in message:
+            return "timeout_or_network"
+        if any(token in message for token in ("temporarily unavailable", "503", "502", "504")):
+            return "transient_error"
+        return "unknown_error"
+
+    def _execute_with_retry(self, operation: Callable[[], Any], *, provider_name: str, operation_name: str = "generate") -> Any:
         """Retry transient provider errors using exponential backoff."""
         for attempt in range(self.max_retries + 1):
             try:
                 return operation()
             except Exception as exc:
+                category = self._error_category(exc)
                 if not is_transient_error(exc):
+                    self.logger.error(
+                        "llm_request_failed provider=%s model=%s operation=%s category=%s",
+                        provider_name,
+                        self.model,
+                        operation_name,
+                        category,
+                    )
                     if isinstance(exc, openai.OpenAIError):
                         raise
                     if genai_errors is not None and isinstance(exc, (genai_errors.APIError, genai_errors.ClientError)):
@@ -196,6 +244,13 @@ class LLMClient:
                         f"{provider_name} request failed: {self._sanitize_exception(str(exc))}"
                     ) from exc
                 if attempt >= self.max_retries:
+                    self.logger.error(
+                        "llm_request_failed provider=%s model=%s operation=%s category=%s retries_exhausted=true",
+                        provider_name,
+                        self.model,
+                        operation_name,
+                        category,
+                    )
                     raise LLMTransientError(
                         f"{provider_name} request failed: max retries reached ({self.max_retries}) - "
                         f"{self._sanitize_exception(str(exc))}"
@@ -207,10 +262,13 @@ class LLMClient:
                     max_backoff_seconds=self.max_backoff_seconds,
                 )
                 self.logger.warning(
-                    "%s transient failure on attempt %s/%s. Retrying in %.1f seconds.",
+                    "llm_retry provider=%s model=%s operation=%s attempt=%s max_retries=%s category=%s delay_seconds=%.2f",
                     provider_name,
+                    self.model,
+                    operation_name,
                     attempt + 1,
-                    self.max_retries + 1,
+                    self.max_retries,
+                    category,
                     delay,
                 )
                 time.sleep(delay)
@@ -244,15 +302,34 @@ class LLMClient:
             logger=self.logger,
         )
 
-    def _execute_with_fallback(self, *, primary_action: Callable[[], Any], fallback_action: Callable[[], Any] | None) -> Any:
+    def _execute_with_fallback(self, *, primary_action: Callable[[], Any], fallback_action: Callable[[], Any] | None, operation_name: str = "generate") -> Any:
         try:
             return primary_action()
-        except LLMTransientError:
+        except LLMTransientError as primary_exc:
             if fallback_action is None:
+                self.logger.error(
+                    "llm_request_failed provider=%s model=%s operation=%s category=transient_error fallback_used=false",
+                    self.provider,
+                    self.model,
+                    operation_name,
+                )
                 raise
+            self.logger.warning(
+                "llm_fallback primary_provider=%s primary_model=%s fallback_provider=%s fallback_model=%s reason=transient_error",
+                self.provider,
+                self.model,
+                self.fallback_provider or self.provider,
+                self.fallback_model or self.model,
+            )
             try:
                 return fallback_action()
             except LLMTransientError as fallback_exc:
+                self.logger.error(
+                    "llm_request_failed provider=%s model=%s operation=%s category=transient_error fallback_used=true",
+                    self.provider,
+                    self.model,
+                    operation_name,
+                )
                 raise LLMTransientError(
                     f"Primary and fallback providers exhausted retries: {self._sanitize_exception(str(fallback_exc))}"
                 ) from fallback_exc
@@ -310,7 +387,7 @@ class LLMClient:
                 max_output_tokens=self.max_output_tokens,
             )
 
-        stream = self._execute_with_retry(request, provider_name="OpenAI")
+        stream = self._execute_with_retry(request, provider_name="OpenAI", operation_name="stream")
         yield from self._iter_stream_chunks(stream)
 
     def _stream_gemini_response(self, customer_message: str) -> Any:
@@ -324,7 +401,7 @@ class LLMClient:
                 contents=combined_prompt,
             )
 
-        stream = self._execute_with_retry(request, provider_name="Gemini")
+        stream = self._execute_with_retry(request, provider_name="Gemini", operation_name="stream")
         yield from self._iter_stream_chunks(stream)
 
     def _stream_with_fallback(
@@ -334,22 +411,77 @@ class LLMClient:
         primary_stream: Callable[[str], Any],
         allow_fallback: bool = True,
     ) -> Any:
+        started_at = time.monotonic()
+        self.logger.info("llm_stream_started provider=%s model=%s operation=stream", self.provider, self.model)
         try:
             yield from primary_stream(customer_message)
+            self.logger.info(
+                "llm_stream_completed provider=%s model=%s operation=stream duration_ms=%.0f",
+                self.provider,
+                self.model,
+                (time.monotonic() - started_at) * 1000,
+            )
             return
         except Exception as exc:
+            category = self._error_category(exc)
             if not is_transient_error(exc):
+                self.logger.error(
+                    "llm_stream_failed provider=%s model=%s operation=stream category=%s duration_ms=%.0f",
+                    self.provider,
+                    self.model,
+                    category,
+                    (time.monotonic() - started_at) * 1000,
+                )
                 raise
             if not allow_fallback:
+                self.logger.error(
+                    "llm_stream_failed provider=%s model=%s operation=stream category=%s duration_ms=%.0f fallback_used=false",
+                    self.provider,
+                    self.model,
+                    category,
+                    (time.monotonic() - started_at) * 1000,
+                )
                 raise LLMTransientError(
                     f"{self.provider.capitalize()} request failed: max retries reached - {self._sanitize_exception(str(exc))}"
                 ) from exc
             fallback_client = self._build_fallback_client()
             if fallback_client is None:
+                self.logger.error(
+                    "llm_stream_failed provider=%s model=%s operation=stream category=%s duration_ms=%.0f fallback_used=false",
+                    self.provider,
+                    self.model,
+                    category,
+                    (time.monotonic() - started_at) * 1000,
+                )
                 raise LLMTransientError(
                     f"{self.provider.capitalize()} request failed: max retries reached - {self._sanitize_exception(str(exc))}"
                 ) from exc
-            yield from fallback_client.stream_response(customer_message, allow_fallback=False)
+            self.logger.warning(
+                "llm_fallback primary_provider=%s primary_model=%s fallback_provider=%s fallback_model=%s reason=%s",
+                self.provider,
+                self.model,
+                self.fallback_provider or self.provider,
+                self.fallback_model or self.model,
+                "transient_error",
+            )
+            try:
+                yield from fallback_client.stream_response(customer_message, allow_fallback=False)
+                self.logger.info(
+                    "llm_stream_completed provider=%s model=%s operation=stream duration_ms=%.0f fallback_used=true",
+                    self.fallback_provider or self.provider,
+                    self.fallback_model or self.model,
+                    (time.monotonic() - started_at) * 1000,
+                )
+                return
+            except Exception as fallback_exc:
+                self.logger.error(
+                    "llm_stream_failed provider=%s model=%s operation=stream category=%s duration_ms=%.0f fallback_used=true",
+                    self.fallback_provider or self.provider,
+                    self.fallback_model or self.model,
+                    self._error_category(fallback_exc),
+                    (time.monotonic() - started_at) * 1000,
+                )
+                raise
 
     def stream_response(self, customer_message: str, *, allow_fallback: bool = True) -> Any:
         """Stream plain-text output from the configured provider without exposing SDK objects."""
@@ -371,6 +503,33 @@ class LLMClient:
             )
 
         raise ValueError(f"Unsupported LLM provider: {self.provider}")
+
+    def _log_request(self, operation: str, *, start_time: float | None = None, succeeded: bool | None = None, category: str | None = None) -> None:
+        duration_ms = None if start_time is None else (time.monotonic() - start_time) * 1000
+        if succeeded is True:
+            self.logger.info(
+                "llm_request_succeeded provider=%s model=%s operation=%s duration_ms=%.0f",
+                self.provider,
+                self.model,
+                operation,
+                duration_ms if duration_ms is not None else 0.0,
+            )
+        elif succeeded is False:
+            self.logger.error(
+                "llm_request_failed provider=%s model=%s operation=%s category=%s duration_ms=%.0f",
+                self.provider,
+                self.model,
+                operation,
+                category or "unknown_error",
+                duration_ms if duration_ms is not None else 0.0,
+            )
+        else:
+            self.logger.info(
+                "llm_request_started provider=%s model=%s operation=%s",
+                self.provider,
+                self.model,
+                operation,
+            )
 
     def _validate_structured_response(self, payload: Any, *, provider_name: str) -> SupportResponse:
         try:
@@ -447,22 +606,36 @@ class LLMClient:
         if not cleaned_message:
             raise ValueError("customer_message must not be empty")
 
-        if self.provider == "openai":
-            fallback_client = self._build_fallback_client()
-            fallback_action = None if fallback_client is None else lambda: fallback_client.process_message(cleaned_message)
-            return self._execute_with_fallback(
-                primary_action=lambda: self._process_openai_message(cleaned_message),
-                fallback_action=fallback_action,
-            )
-        if self.provider == "gemini":
-            fallback_client = self._build_fallback_client()
-            fallback_action = None if fallback_client is None else lambda: fallback_client.process_message(cleaned_message)
-            return self._execute_with_fallback(
-                primary_action=lambda: self._process_gemini_message(cleaned_message),
-                fallback_action=fallback_action,
-            )
+        start_time = time.monotonic()
+        self._log_request("generate")
 
-        raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        try:
+            if self.provider == "openai":
+                fallback_client = self._build_fallback_client()
+                fallback_action = None if fallback_client is None else lambda: fallback_client.process_message(cleaned_message)
+                response = self._execute_with_fallback(
+                    primary_action=lambda: self._process_openai_message(cleaned_message),
+                    fallback_action=fallback_action,
+                    operation_name="generate",
+                )
+                self._log_request("generate", start_time=start_time, succeeded=True)
+                return response
+            if self.provider == "gemini":
+                fallback_client = self._build_fallback_client()
+                fallback_action = None if fallback_client is None else lambda: fallback_client.process_message(cleaned_message)
+                response = self._execute_with_fallback(
+                    primary_action=lambda: self._process_gemini_message(cleaned_message),
+                    fallback_action=fallback_action,
+                    operation_name="generate",
+                )
+                self._log_request("generate", start_time=start_time, succeeded=True)
+                return response
+
+            raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        except Exception as exc:
+            category = self._error_category(exc)
+            self._log_request("generate", start_time=start_time, succeeded=False, category=category)
+            raise
 
     def generate(
         self,
@@ -474,23 +647,37 @@ class LLMClient:
         if response_model is None:
             response_model = SupportResponse
 
-        if self.provider == "openai":
-            fallback_client = self._build_fallback_client()
-            fallback_action = None if fallback_client is None else lambda: fallback_client.generate(system_prompt, user_prompt, response_model)
-            return self._execute_with_fallback(
-                primary_action=lambda: self._generate_openai_response(system_prompt, user_prompt, response_model),
-                fallback_action=fallback_action,
-            )
+        start_time = time.monotonic()
+        self._log_request("generate")
 
-        if self.provider == "gemini":
-            fallback_client = self._build_fallback_client()
-            fallback_action = None if fallback_client is None else lambda: fallback_client.generate(system_prompt, user_prompt, response_model)
-            return self._execute_with_fallback(
-                primary_action=lambda: self._generate_gemini_response(system_prompt, user_prompt, response_model),
-                fallback_action=fallback_action,
-            )
+        try:
+            if self.provider == "openai":
+                fallback_client = self._build_fallback_client()
+                fallback_action = None if fallback_client is None else lambda: fallback_client.generate(system_prompt, user_prompt, response_model)
+                result = self._execute_with_fallback(
+                    primary_action=lambda: self._generate_openai_response(system_prompt, user_prompt, response_model),
+                    fallback_action=fallback_action,
+                    operation_name="generate",
+                )
+                self._log_request("generate", start_time=start_time, succeeded=True)
+                return result
 
-        raise ValueError(f"Unsupported LLM provider: {self.provider}")
+            if self.provider == "gemini":
+                fallback_client = self._build_fallback_client()
+                fallback_action = None if fallback_client is None else lambda: fallback_client.generate(system_prompt, user_prompt, response_model)
+                result = self._execute_with_fallback(
+                    primary_action=lambda: self._generate_gemini_response(system_prompt, user_prompt, response_model),
+                    fallback_action=fallback_action,
+                    operation_name="generate",
+                )
+                self._log_request("generate", start_time=start_time, succeeded=True)
+                return result
+
+            raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        except Exception as exc:
+            category = self._error_category(exc)
+            self._log_request("generate", start_time=start_time, succeeded=False, category=category)
+            raise
 
     def _generate_openai_response(
         self,
