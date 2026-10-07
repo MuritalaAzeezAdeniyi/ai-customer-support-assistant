@@ -167,5 +167,8 @@ Run the unit tests with:
 ```bash
 pytest -q
 ```
+## Demo
+
+[Watch the Demo Recording](https://www.loom.com/share/f5eab605c87040659f37c6fdf61ff4d3)
 
 This project intentionally avoids real OpenAI or Gemini calls in normal unit tests. Any live API requests should be triggered only with a valid local environment configuration.
